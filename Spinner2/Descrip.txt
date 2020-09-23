@@ -1,0 +1,1 @@
+Spinning Illusions by Robert Rayment.  Just a bit of VB doodling, 8 shapes with odd effects.  [ Shaped form & picbox, +/- rotation <-> anti-alias rotation, VB<->ASM, res wav ]. Zip 100 KB, Win98. 
