@@ -1,0 +1,571 @@
+     1                                  ; AARotate.asm  by Robert Rayment  16/4/02
+     2                                  
+     3                                  ; VB
+     4                                  
+     5                                  ; ' MCode Structure
+     6                                  ; Public Type MCodeStruc
+     7                                  ;    PICW As Long
+     8                                  ;    PICH As Long
+     9                                  ;    PtrPalBGR As Long
+    10                                  ;    PalSize As Long
+    11                                  ;    zang As Single
+    12                                  ; End Type
+    13                                  ; Public MCODE As MCodeStruc
+    14                                  ;   
+    15                                  ; ptMC = Ptr to mcode byte array
+    16                                  ; ptrStruc = VarPtr(MCODE.PICW)
+    17                                  ;
+    18                                  ; MCODE.zang = zang
+    19                                  ;
+    20                                  ; ' ANTI-ALIAS ROTATE
+    21                                  ; res = CallWindowProc(ptMC, ptrStruc, 0&, 0&, RotFlag)
+    22                                  ;                       [ebp +  8      12  16  20 ]
+    23                                  ; RotFlag=0 for Rotate
+    24                                  ; RotFlag=1 for anti-alias Rotate
+    25                                  
+    26                                  %macro movab 2      ; name & num of parameters
+    27                                    push dword %2     ; 2nd param
+    28                                    pop dword %1      ; 1st param
+    29                                  %endmacro           ; use  movab %1,%2
+    30                                  ; Allows eg movab bmW,[ebx+4]
+    31                                  
+    32                                  %define PICW            [ebp-4]     ; PICW Mod 4
+    33                                  %define PICH            [ebp-8]     ; PICH
+    34                                  %define PtrPalBGR       [ebp-12]    ; PTR to PalBGR(1,1,1,1)
+    35                                  %define PalSize         [ebp-16]    ; 4*PICW*PICH Plane size in bytes
+    36                                  %define zang            [ebp-20]    ; rotation, anglular step in +/- radians
+    37                                  
+    38                                  %define zCos    [ebp-24]
+    39                                  %define zSin    [ebp-28]
+    40                                  %define ixc     [ebp-32] 
+    41                                  %define iyc     [ebp-36]
+    42                                  
+    43                                  %define ix      [ebp-40] 
+    44                                  %define iy      [ebp-44]
+    45                                  
+    46                                  %define xs      [ebp-48]
+    47                                  %define ys      [ebp-52]
+    48                                  %define ixs0    [ebp-56] 
+    49                                  %define iys0    [ebp-60]    
+    50                                  
+    51                                  %define xsf     [ebp-64]    ; scale factors 
+    52                                  %define ysf     [ebp-68]    
+    53                                  
+    54                                  %define culb    [ebp-72] 
+    55                                  %define culg    [ebp-76] 
+    56                                  %define culr    [ebp-80] 
+    57                                  
+    58                                  %define RotFlag [ebp-84]    ; 0 Rot, 1 AARot
+    59                                  %define Half    [ebp-88]    ; to get int
+    60                                  
+    61                                  [BITS 32]
+    62                                  
+    63 00000000 55                          push ebp
+    64 00000001 89E5                        mov ebp,esp
+    65 00000003 81EC58000000                sub esp,88
+    66 00000009 57                          push edi
+    67 0000000A 56                          push esi
+    68 0000000B 53                          push ebx
+    69                                  
+    70                                      ; Copy structure
+    71 0000000C 8B5D08                      mov ebx,[ebp+8]
+    72                                      
+    73                                      movab PICW,          [ebx]
+    74 0000000F FF33                <1>   push dword %2
+    75 00000011 8F45FC              <1>   pop dword %1
+    76                                      movab PICH,          [ebx+4]
+    77 00000014 FF7304              <1>   push dword %2
+    78 00000017 8F45F8              <1>   pop dword %1
+    79                                      movab PtrPalBGR,     [ebx+8]
+    80 0000001A FF7308              <1>   push dword %2
+    81 0000001D 8F45F4              <1>   pop dword %1
+    82                                      movab PalSize,       [ebx+12]
+    83 00000020 FF730C              <1>   push dword %2
+    84 00000023 8F45F0              <1>   pop dword %1
+    85                                      movab zang,          [ebx+16]
+    86 00000026 FF7310              <1>   push dword %2
+    87 00000029 8F45EC              <1>   pop dword %1
+    88                                      
+    89                                  
+    90                                      ; Get 0.5 for int round down
+    91 0000002C B802000000                  mov eax,2
+    92 00000031 8945A8                      mov Half,eax
+    93 00000034 D9E8                        fld1        
+    94 00000036 DB45A8                      fild dword Half     ; 2, 1
+    95 00000039 DEF9                        fdivp st1           ; 1/2
+    96 0000003B D95DA8                      fstp dword Half
+    97                                  
+    98                                      ; Get sin(zang) & Cos(zang)
+    99                                  
+   100 0000003E D945EC                      fld dword zang
+   101 00000041 D9FB                        fsincos
+   102 00000043 D95DE8                      fstp dword zCos     ; Cos(zang)
+   103 00000046 D95DE4                      fstp dword zSin     ; Sin(zang)
+   104                                  
+   105 00000049 8B45FC                      mov eax,PICW
+   106 0000004C D1E8                        shr eax,1
+   107 0000004E 8945E0                      mov ixc,eax         ; xcen
+   108                                  
+   109 00000051 8B45F8                      mov eax,PICH
+   110 00000054 D1E8                        shr eax,1
+   111 00000056 8945DC                      mov iyc,eax         ; ycen
+   112                                  
+   113                                  
+   114                                      ; Get initial source & destin pointers
+   115                                      
+   116 00000059 8B7DF4                      mov edi,PtrPalBGR   ; pts to PalBGR(1,1,1,1)
+   117 0000005C 89FE                        mov esi,edi         ; esi pts to SOURCE PalBGR(1,1,1,1) Blue
+   118 0000005E 8B45F0                      mov eax,PalSize
+   119 00000061 01C7                        add edi,eax         ; edi pts to DESTIN PalBGR(1,1,1,2) Blue
+   120                                  
+   121                                      ; Get RotFlag
+   122                                      movab eax,[ebp+20]  ; RotFlag
+   123 00000063 FF7514              <1>   push dword %2
+   124 00000066 58                  <1>   pop dword %1
+   125                                  
+   126                                      ;mov eax,RotFlag
+   127 00000067 3D00000000                  cmp eax,0
+   128 0000006C 750A                        jnz DoAAR
+   129                                      
+   130 0000006E E813000000                  Call Rotate32
+   131                                      
+   132 00000073 E905000000                  jmp GETOUT
+   133                                  
+   134                                  DoAAR:
+   135                                  
+   136 00000078 E8CC000000                  Call AARotate32
+   137                                  
+   138                                  GETOUT:
+   139 0000007D 5B                          pop ebx
+   140 0000007E 5E                          pop esi
+   141 0000007F 5F                          pop edi
+   142 00000080 89EC                        mov esp,ebp
+   143 00000082 5D                          pop ebp
+   144 00000083 C21000                      ret 16
+   145                                  
+   146                                  ;############################################################
+   147                                  ;============================================================
+   148                                  Rotate32: ; 0         Rotate(display) 1 into 2
+   149                                  
+   150 00000086 8B45F8                      mov eax,PICH
+   151 00000089 89C1                        mov ecx,eax
+   152                                  IY0:
+   153 0000008B 894DD4                      mov iy,ecx
+   154 0000008E 51                          push ecx
+   155                                      
+   156 0000008F 8B45FC                      mov eax,PICW
+   157 00000092 89C1                        mov ecx,eax
+   158                                  IX0:
+   159 00000094 894DD8                      mov ix,ecx
+   160                                      ;-----------------------
+   161                                      ; Get ixs0
+   162 00000097 DB45D8                      fild dword ix
+   163 0000009A DB45E0                      fild dword ixc
+   164 0000009D DEE9                        fsubp st1           ; (ix-ixc)
+   165 0000009F D945E8                      fld dword zCos
+   166 000000A2 DEC9                        fmulp st1           ; (ix-Xp)*zCos
+   167 000000A4 DB45D4                      fild dword iy
+   168 000000A7 DB45DC                      fild dword iyc
+   169 000000AA DEE9                        fsubp st1           ; (iy-iyc)
+   170 000000AC D945E4                      fld dword zSin
+   171 000000AF DEC9                        fmulp st1           ; (iy-iyc)*zSin, (ix-ixc)*zCos
+   172 000000B1 DEC1                        faddp st1           ; (ix-ixc)*zCos + (iy-iyc)*zSin
+   173 000000B3 DB45E0                      fild dword ixc
+   174 000000B6 DEC1                        faddp st1           ; ixc + (ix-ixc)*zCos + (iy-iyc)*zSin
+   175 000000B8 DB5DC8                      fistp dword ixs0
+   176                                  
+   177                                      ; Get iys0
+   178 000000BB DB45D4                      fild dword iy
+   179 000000BE DB45DC                      fild dword iyc
+   180 000000C1 DEE9                        fsubp st1           ; (iy-iyc)
+   181 000000C3 D945E8                      fld dword zCos
+   182 000000C6 DEC9                        fmulp st1           ; (iy-iyc)*zCos
+   183 000000C8 DB45D8                      fild dword ix
+   184 000000CB DB45E0                      fild dword ixc
+   185 000000CE DEE9                        fsubp st1           ; (ix-ixc)
+   186 000000D0 D945E4                      fld dword zSin
+   187 000000D3 DEC9                        fmulp st1           ; (ix-ixc)*zSin, (iy-iyc)*zCos
+   188 000000D5 DEE9                        fsubp st1           ; (iy-Yp)*zCos - (ix-Xp)*zSin
+   189 000000D7 DB45DC                      fild dword iyc
+   190 000000DA DEC1                        faddp st1           ; Yp + (iy-iyc)*zCos + (ix-ixc)*zSin
+   191 000000DC DB5DC4                      fistp dword iys0
+   192                                  
+   193                                      ; Check in-range
+   194 000000DF 8B45C8                      mov eax,ixs0
+   195 000000E2 3D01000000                  cmp eax,1
+   196 000000E7 7C50                        jl nexix0
+   197 000000E9 3B45FC                      cmp eax,PICW
+   198 000000EC 7D4B                        jge nexix0
+   199 000000EE 8B45C4                      mov eax,iys0
+   200 000000F1 3D01000000                  cmp eax,1
+   201 000000F6 7C41                        jl nexix0
+   202 000000F8 3B45F8                      cmp eax,PICH
+   203 000000FB 7D3C                        jge nexix0
+   204                                  
+   205                                  ;   InRange
+   206                                      ; BGR @ ixs,iys in 3 -> ix,iy in 2
+   207                                      ; esi->3  edi->2
+   208                                      
+   209 000000FD 57                          push edi
+   210 000000FE 56                          push esi
+   211                                      
+   212                                      ;Call GetAddrESIixsiys       ; 1 @ ixs0,iys0
+   213 000000FF 8B45C4                      mov eax,iys0
+   214 00000102 48                          dec eax
+   215 00000103 8B5DFC                      mov ebx,PICW
+   216 00000106 F7E3                        mul ebx
+   217 00000108 8B5DC8                      mov ebx,ixs0
+   218 0000010B 4B                          dec ebx
+   219 0000010C 01D8                        add eax,ebx
+   220 0000010E C1E002                      shl eax,2       ; x4
+   221 00000111 01C6                        add esi,eax
+   222                                      
+   223                                  	;Call GetAddrEDIixiy         ; 2 @ ix,iy
+   224 00000113 8B45D4                      mov eax,iy
+   225 00000116 48                          dec eax
+   226 00000117 8B5DFC                      mov ebx,PICW
+   227 0000011A F7E3                        mul ebx
+   228 0000011C 8B5DD8                      mov ebx,ix
+   229 0000011F 4B                          dec ebx
+   230 00000120 01D8                        add eax,ebx
+   231 00000122 C1E002                      shl eax,2       ; x4
+   232 00000125 01C7                        add edi,eax
+   233                                     
+   234 00000127 8A06                        mov aL,byte [esi]
+   235 00000129 8807                        mov byte [edi],aL
+   236 0000012B 8A4601                      mov aL,byte [esi+1]
+   237 0000012E 884701                      mov byte [edi+1],aL
+   238 00000131 8A4602                      mov aL,byte [esi+2]
+   239 00000134 884702                      mov byte [edi+2],aL
+   240                                  
+   241 00000137 5E                          pop esi
+   242 00000138 5F                          pop edi
+   243                                      
+   244                                      ;-----------------------
+   245                                  nexix0:
+   246 00000139 49                          dec ecx
+   247 0000013A 0F8554FFFFFF                jnz near IX0
+   248                                      
+   249 00000140 59                          pop ecx
+   250 00000141 49                          dec ecx
+   251 00000142 0F8543FFFFFF                jnz near IY0
+   252 00000148 C3                      RET
+   253                                  
+   254                                  ;============================================================
+   255                                  AARotate32: ; 1         Anti-alias Rotate(display) 1 into 2
+   256                                  
+   257                                  
+   258 00000149 8B45F8                      mov eax,PICH
+   259 0000014C 89C1                        mov ecx,eax
+   260                                  IY1:
+   261 0000014E 894DD4                      mov iy,ecx
+   262 00000151 51                          push ecx
+   263                                      
+   264 00000152 8B45FC                      mov eax,PICW
+   265 00000155 89C1                        mov ecx,eax
+   266                                  IX1:
+   267 00000157 894DD8                      mov ix,ecx
+   268                                      
+   269                                      ;-----------------------
+   270                                      ; Get xs
+   271 0000015A DB45D8                      fild dword ix
+   272 0000015D DB45E0                      fild dword ixc
+   273 00000160 DEE9                        fsubp st1           ; (ix-ixc)
+   274 00000162 D945E8                      fld dword zCos
+   275 00000165 DEC9                        fmulp st1           ; (ix-ixc)*zCos
+   276 00000167 DB45D4                      fild dword iy
+   277 0000016A DB45DC                      fild dword iyc
+   278 0000016D DEE9                        fsubp st1           ; (iy-iyc)
+   279 0000016F D945E4                      fld dword zSin
+   280 00000172 DEC9                        fmulp st1           ; (iy-iyc)*zSin, (ix-ixc)*zCos
+   281 00000174 DEC1                        faddp st1           ; (ix-ixc)*zCos + (iy-iyc)*zSin
+   282 00000176 DB45E0                      fild dword ixc
+   283 00000179 DEC1                        faddp st1           ; ixc + (ix-ixc)*zCos + (iy-iyc)*zSin
+   284 0000017B D95DD0                      fstp dword xs       ; REAL
+   285                                   
+   286                                      ; Get ys
+   287 0000017E DB45D4                      fild dword iy
+   288 00000181 DB45DC                      fild dword iyc
+   289 00000184 DEE9                        fsubp st1           ; (iy-iyc)
+   290 00000186 D945E8                      fld dword zCos
+   291 00000189 DEC9                        fmulp st1           ; (iy-iyc)*zCos
+   292 0000018B DB45D8                      fild dword ix
+   293 0000018E DB45E0                      fild dword ixc
+   294 00000191 DEE9                        fsubp st1           ; (ix-ixc)
+   295 00000193 D945E4                      fld dword zSin
+   296 00000196 DEC9                        fmulp st1           ; (ix-ixc)*zSin, (iy-iyc)*zCos
+   297 00000198 DEE9                        fsubp st1           ; (iy-iyc)*zCos - (ix-ixc)*zSin
+   298 0000019A DB45DC                      fild dword iyc
+   299 0000019D DEC1                        faddp st1           ; iyc + (iy-iyc)*zCos - (ix-ixc)*zSin
+   300 0000019F D95DCC                      fstp dword ys       ; REAL
+   301                                  
+   302                                      ;-----------------------
+   303                                      ; Get ixs0,iys0  INTEGERS
+   304 000001A2 D945D0                      fld dword xs
+   305 000001A5 D945A8                      fld dword Half      ; 0.5, xs
+   306 000001A8 DEE9                        fsubp st1           ; xs-0.5
+   307 000001AA DB5DC8                      fistp dword ixs0    ; truncated xs
+   308                                  
+   309 000001AD D945CC                      fld dword ys
+   310 000001B0 D945A8                      fld dword Half      ; 0.5, ys
+   311 000001B3 DEE9                        fsubp st1           ; ys-0.5
+   312 000001B5 DB5DC4                      fistp dword iys0    ; truncated ys
+   313                                      ;-----------------------
+   314                                  
+   315                                      ; Check in-range
+   316 000001B8 8B45C8                      mov eax,ixs0
+   317 000001BB 3D01000000                  cmp eax,1
+   318 000001C0 0F8C4D010000                jl near nexix1
+   319 000001C6 3B45FC                      cmp eax,PICW
+   320 000001C9 0F8D44010000                jge near nexix1
+   321 000001CF 8B45C4                      mov eax,iys0
+   322 000001D2 3D01000000                  cmp eax,1
+   323 000001D7 0F8C36010000                jl near nexix1
+   324 000001DD 3B45F8                      cmp eax,PICH
+   325 000001E0 0F8D2D010000                jge near nexix1
+   326                                  
+   327                                  ;   InRange
+   328                                      
+   329                                      ; Get scale factors xsf=xs-ixs0, ysf=ys-iys0
+   330 000001E6 D945D0                      fld dword xs
+   331 000001E9 DB45C8                      fild dword ixs0
+   332 000001EC DEE9                        fsubp st1       ; xs-ixs0
+   333 000001EE D95DC0                      fstp dword xsf
+   334                                      
+   335 000001F1 D945CC                      fld dword ys
+   336 000001F4 DB45C4                      fild dword iys0
+   337 000001F7 DEE9                        fsubp st1       ; ys-iys0
+   338 000001F9 D95DBC                      fstp dword ysf
+   339                                      
+   340                                      ; Pick up from 1 esi
+   341                                      
+   342 000001FC 56                          push esi        ;>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+   343                                      
+   344                                      ;Call GetAddrESIixsiys
+   345 000001FD 8B45C4                      mov eax,iys0
+   346 00000200 48                          dec eax
+   347 00000201 8B5DFC                      mov ebx,PICW
+   348 00000204 F7E3                        mul ebx
+   349 00000206 8B5DC8                      mov ebx,ixs0
+   350 00000209 4B                          dec ebx
+   351 0000020A 01D8                        add eax,ebx
+   352 0000020C C1E002                      shl eax,2       ; x4
+   353 0000020F 01C6                        add esi,eax
+   354                                  
+   355 00000211 8B5DFC                      mov ebx,PICW
+   356 00000214 C1E302                      shl ebx,2               ; 4*PICW
+   357                                      ;===================================
+   358                                      ; Get weighted Blue over 4 points
+   359                                      ; y, x->x+1
+   360 00000217 0FB606                      movzx eax,byte[esi]     ; B
+   361 0000021A 8945B8                      mov culb,eax
+   362 0000021D DB45B8                      fild dword culb
+   363 00000220 0FB64604                    movzx eax,byte[esi+4]   ; B+1
+   364 00000224 8945B8                      mov culb,eax
+   365 00000227 DB45B8                      fild dword culb        ; P2, P1
+   366 0000022A D8E1                        fsub st1                ; (P2-P1), P1
+   367 0000022C D945C0                      fld dword xsf
+   368 0000022F DEC9                        fmulp st1               ; xsf*(P2-P1), P1
+   369 00000231 DEC1                        faddp st1               ; PA = P1 + xsf*(P2-P1)
+   370                                      ; y+1, x->x+1
+   371 00000233 0FB6041E                    movzx eax,byte[esi+ebx] ; B
+   372 00000237 8945B8                      mov culb,eax
+   373 0000023A DB45B8                      fild dword culb
+   374 0000023D 0FB6441E04                  movzx eax,byte[esi+ebx+4]   ; B+1
+   375 00000242 8945B8                      mov culb,eax
+   376 00000245 DB45B8                      fild dword culb        ; P4, P3
+   377 00000248 D8E1                        fsub st1                ; (P4-P3), P3
+   378 0000024A D945C0                      fld dword xsf
+   379 0000024D DEC9                        fmulp st1               ; xsf*(P4-P3), P3
+   380 0000024F DEC1                        faddp st1               ; PB= P3 + xsf*(P4-P3), PA
+   381                                      ; y->y+1
+   382 00000251 D8E1                        fsub st1                ; (PB-PA), PA
+   383 00000253 D945BC                      fld dword ysf
+   384 00000256 DEC9                        fmulp st1               ; ysf*(PB-PA), PA
+   385 00000258 DEC1                        faddp st1               ; PA + ysf*(PB-PA)
+   386                                      
+   387 0000025A DB5DB8                      fistp dword culb
+   388                                      ;===================================
+   389                                      
+   390                                      ; Get weighted Green over 4 points
+   391                                      
+   392 0000025D 46                          inc esi ; GREEN
+   393                                      
+   394 0000025E 0FB606                      movzx eax,byte[esi]     ; G
+   395 00000261 8945B4                      mov culg,eax
+   396 00000264 DB45B4                      fild dword culg
+   397 00000267 0FB64604                    movzx eax,byte[esi+4]   ; G+1
+   398 0000026B 8945B4                      mov culg,eax
+   399 0000026E DB45B4                      fild dword culg        ; P2, P1
+   400 00000271 D8E1                        fsub st1                ; (P2-P1), P1
+   401 00000273 D945C0                      fld dword xsf
+   402 00000276 DEC9                        fmulp st1               ; xsf*(P2-P1), P1
+   403 00000278 DEC1                        faddp st1               ; PA = P1 + xsf*(P2-P1)
+   404                                      
+   405 0000027A 0FB6041E                    movzx eax,byte[esi+ebx] ; G
+   406 0000027E 8945B4                      mov culg,eax
+   407 00000281 DB45B4                      fild dword culg
+   408 00000284 0FB6441E04                  movzx eax,byte[esi+ebx+4]   ; B+1
+   409 00000289 8945B4                      mov culg,eax
+   410 0000028C DB45B4                      fild dword culg        ; P4, P3
+   411 0000028F D8E1                        fsub st1                ; (P4-P3), P3
+   412 00000291 D945C0                      fld dword xsf
+   413 00000294 DEC9                        fmulp st1               ; xsf*(P4-P3), P3
+   414 00000296 DEC1                        faddp st1               ; PB= P3 + xsf*(P4-P3), PA
+   415                                      
+   416 00000298 D8E1                        fsub st1                ; (PB-PA), PA
+   417 0000029A D945BC                      fld dword ysf
+   418 0000029D DEC9                        fmulp st1               ; ysf*(PB-PA), PA
+   419 0000029F DEC1                        faddp st1               ; PA + ysf*(PB-PA)
+   420                                      
+   421 000002A1 DB5DB4                      fistp dword culg
+   422                                      ;===================================
+   423                                  
+   424                                      ; Get weighted Red over 4 points
+   425                                      
+   426 000002A4 46                          inc esi ; RED  
+   427                                      
+   428 000002A5 0FB606                      movzx eax,byte[esi]     ; R
+   429 000002A8 8945B0                      mov culr,eax
+   430 000002AB DB45B0                      fild dword culr
+   431 000002AE 0FB64604                    movzx eax,byte[esi+4]   ; R+1
+   432 000002B2 8945B0                      mov culr,eax
+   433 000002B5 DB45B0                      fild dword culr        ; P2, P1
+   434 000002B8 D8E1                        fsub st1                ; (P2-P1), P1
+   435 000002BA D945C0                      fld dword xsf
+   436 000002BD DEC9                        fmulp st1               ; xsf*(P2-P1), P1
+   437 000002BF DEC1                        faddp st1               ; PA = P1 + xsf*(P2-P1)
+   438                                      
+   439 000002C1 0FB6041E                    movzx eax,byte[esi+ebx] ; R
+   440 000002C5 8945B0                      mov culr,eax
+   441 000002C8 DB45B0                      fild dword culr
+   442 000002CB 0FB6441E04                  movzx eax,byte[esi+ebx+4]   ; R+1
+   443 000002D0 8945B0                      mov culr,eax
+   444 000002D3 DB45B0                      fild dword culr        ; P4, P3
+   445 000002D6 D8E1                        fsub st1                ; (P4-P3), P3
+   446 000002D8 D945C0                      fld dword xsf
+   447 000002DB DEC9                        fmulp st1               ; xsf*(P4-P3), P3
+   448 000002DD DEC1                        faddp st1               ; PB= P3 + xsf*(P4-P3), PA
+   449                                      
+   450 000002DF D8E1                        fsub st1                ; (PB-PA), PA
+   451 000002E1 D945BC                      fld dword ysf
+   452 000002E4 DEC9                        fmulp st1               ; ysf*(PB-PA), PA
+   453 000002E6 DEC1                        faddp st1               ; PA + ysf*(PB-PA)
+   454                                      
+   455 000002E8 DB5DB0                      fistp dword culr
+   456                                      ;===================================
+   457                                  
+   458 000002EB 5E                          pop esi     ; <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   459                                      
+   460                                  
+   461                                      ; Ensure colors in range ??
+   462                                      ;Call near CheckculBGRT
+   463                                      
+   464 000002EC 57                          push edi    ; >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+   465                                      
+   466                                      ;Call GetAddrEDIixiy
+   467 000002ED 8B45D4                      mov eax,iy
+   468 000002F0 48                          dec eax
+   469 000002F1 8B5DFC                      mov ebx,PICW
+   470 000002F4 F7E3                        mul ebx
+   471 000002F6 8B5DD8                      mov ebx,ix
+   472 000002F9 4B                          dec ebx
+   473 000002FA 01D8                        add eax,ebx
+   474 000002FC C1E002                      shl eax,2       ; x4
+   475 000002FF 01C7                        add edi,eax
+   476                                  
+   477 00000301 8B45B0                      mov eax,culr
+   478 00000304 C1E008                      shl eax,8
+   479 00000307 0345B4                      add eax,culg
+   480 0000030A C1E008                      shl eax,8
+   481 0000030D 0345B8                      add eax,culb
+   482 00000310 8907                        mov [edi],eax
+   483                                      
+   484                                  	; Equiv to:-
+   485                                      ;mov eax,culb
+   486                                      ;mov byte[edi],aL
+   487                                      ;mov eax,culg
+   488                                      ;mov byte[edi+1],aL
+   489                                      ;mov eax,culr
+   490                                      ;mov byte[edi+2],aL
+   491                                      
+   492 00000312 5F                          pop edi     ; <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   493                                  
+   494                                      ;-----------------------
+   495                                  nexix1:
+   496 00000313 49                          dec ecx
+   497 00000314 0F853DFEFFFF                jnz near IX1
+   498                                      
+   499 0000031A 59                          pop ecx
+   500 0000031B 49                          dec ecx
+   501 0000031C 0F852CFEFFFF                jnz near IY1
+   502                                  
+   503 00000322 C3                      RET
+   504                                  ;============================================================
+   505                                  ;============================================================
+   506                                  
+   507                                  CheckculBGRT:
+   508                                      
+   509                                      ; Ensure colors in range
+   510 00000323 B8FF000000                  mov eax,255
+   511 00000328 3945B8                      cmp culb,eax   ; culb-255
+   512 0000032B 7E03                        jle THG
+   513 0000032D 8945B8                      mov culb,eax
+   514                                  THG:
+   515 00000330 3945B4                      cmp culg,eax
+   516 00000333 7E03                        jle THR
+   517 00000335 8945B4                      mov culg,eax
+   518                                  THR:
+   519 00000338 3945B0                      cmp culr,eax
+   520 0000033B 7E03                        jle LoLim
+   521 0000033D 8945B0                      mov culr,eax
+   522                                  LoLim:
+   523 00000340 B800000000                  mov eax,0
+   524 00000345 3945B8                      cmp culb,eax   ; culb-0
+   525 00000348 7D03                        jge TLG
+   526 0000034A 8945B8                      mov culb,eax
+   527                                  TLG:
+   528 0000034D 3945B4                      cmp culg,eax
+   529 00000350 7D03                        jge TLR
+   530 00000352 8945B4                      mov culg,eax
+   531                                  TLR:
+   532 00000355 3945B0                      cmp culr,eax
+   533 00000358 7D03                        jge CulsDone
+   534 0000035A 8945B0                      mov culr,eax
+   535                                  
+   536                                  CulsDone:
+   537                                  
+   538 0000035D C3                      RET
+   539                                  ;============================================================
+   540                                  
+   541                                  
+   542                                  GetAddrESIixsiys:   ; Src esi-> PalBGR(1,1,1,1),ixs0,iys0  Out: new esi->Blue
+   543                                      ;B = esi + (4 * (iys0-1) * PICW + 4 * (ixs0-1))
+   544                                      ;B = esi + 4 * [ (iys0-1) * PICW + (ixs0-1)) ]
+   545 0000035E 8B45C4                      mov eax,iys0
+   546 00000361 48                          dec eax
+   547 00000362 8B5DFC                      mov ebx,PICW
+   548 00000365 F7E3                        mul ebx
+   549 00000367 8B5DC8                      mov ebx,ixs0
+   550 0000036A 4B                          dec ebx
+   551 0000036B 01D8                        add eax,ebx
+   552 0000036D C1E002                      shl eax,2       ; x4
+   553 00000370 01C6                        add esi,eax
+   554 00000372 C3                      RET
+   555                                  
+   556                                  ;============================================================
+   557                                  
+   558                                  GetAddrEDIixiy: ; Dest edi->PalBGR(1,1,1,2),ix,iy  Out: new edi->Blue
+   559                                      ;B = edi + (4 * (iy-1) * PICW + 4 * (ix-1))
+   560                                      ;B = edi + 4 * [ (iy-1) * PICW + (ix-1)) ]
+   561 00000373 8B45D4                      mov eax,iy
+   562 00000376 48                          dec eax
+   563 00000377 8B5DFC                      mov ebx,PICW
+   564 0000037A F7E3                        mul ebx
+   565 0000037C 8B5DD8                      mov ebx,ix
+   566 0000037F 4B                          dec ebx
+   567 00000380 01D8                        add eax,ebx
+   568 00000382 C1E002                      shl eax,2       ; x4
+   569 00000385 01C7                        add edi,eax
+   570 00000387 C3                      RET
+   571                                  ;============================================================
